@@ -27,7 +27,7 @@ TOOLS = ["get_elite_state", "get_full_loadout", "get_navroute", "get_status",
 
 # Companion modules (bin/modules) extend the contract additively.
 import modules as _modules
-ENDPOINTS += sorted(_modules.http_routes())
+ENDPOINTS += sorted(_modules.http_routes()) + sorted(_modules.http_post_routes())
 TOOLS += [name for entry in _modules.module_info() for name in entry["mcp_tools"]]
 
 

@@ -1,0 +1,299 @@
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+BIN = Path(__file__).resolve().parents[1] / "bin"
+sys.path.insert(0, str(BIN))
+
+import modules.cmdkeys as cmdkeys
+from modules.cmdkeys import binds as B
+from modules.cmdkeys import macros as M
+from modules.cmdkeys import scancodes as S
+
+BINDS_XML = """<?xml version="1.0" encoding="UTF-8" ?>
+<Root PresetName="Custom" MajorVersion="4" MinorVersion="1">
+\t<KeyboardLayout>en-US</KeyboardLayout>
+\t<MouseXMode Value="" />
+\t<YawAxisRaw>
+\t\t<Binding Device="SaitekX52Pro" Key="Joy_RZAxis" />
+\t\t<Inverted Value="0" />
+\t</YawAxisRaw>
+\t<LandingGearToggle>
+\t\t<Primary Device="Keyboard" Key="Key_L">
+\t\t\t<Modifier Device="Keyboard" Key="Key_RightShift" />
+\t\t</Primary>
+\t\t<Secondary Device="{NoDevice}" Key="" />
+\t</LandingGearToggle>
+\t<DeployHardpointToggle>
+\t\t<Primary Device="SaitekX52Pro" Key="Joy_2" />
+\t\t<Secondary Device="Keyboard" Key="Key_U" />
+\t</DeployHardpointToggle>
+\t<ShipSpotLightToggle>
+\t\t<Primary Device="Keyboard" Key="Key_Insert" />
+\t\t<Secondary Device="{NoDevice}" Key="" />
+\t</ShipSpotLightToggle>
+\t<Supercruise>
+\t\t<Primary Device="{NoDevice}" Key="" />
+\t\t<Secondary Device="{NoDevice}" Key="" />
+\t</Supercruise>
+\t<ToggleCargoScoop>
+\t\t<Primary Device="Keyboard" Key="Key_Home" />
+\t\t<Secondary Device="{NoDevice}" Key="" />
+\t\t<ToggleOn Value="1" />
+\t</ToggleCargoScoop>
+\t<EjectAllCargo>
+\t\t<Primary Device="Keyboard" Key="Key_J">
+\t\t\t<Modifier Device="SaitekX52Pro" Key="Joy_5" />
+\t\t</Primary>
+\t\t<Secondary Device="{NoDevice}" Key="" />
+\t</EjectAllCargo>
+</Root>
+"""
+
+USER_KEYS = ("Key_0 Key_1 Key_2 Key_3 Key_4 Key_5 Key_6 Key_7 Key_8 Key_9 Key_A Key_B Key_BackSlash "
+             "Key_Backspace Key_C Key_D Key_Delete Key_DownArrow Key_E Key_End Key_Enter Key_Equals Key_F "
+             "Key_F1 Key_F12 Key_G Key_H Key_Home Key_Insert Key_J Key_L Key_LeftAlt Key_LeftArrow "
+             "Key_LeftBracket Key_LeftControl Key_LeftShift Key_M Key_Minus Key_N Key_Numpad_0 Key_Numpad_1 "
+             "Key_Numpad_2 Key_Numpad_3 Key_Numpad_4 Key_Numpad_5 Key_Numpad_6 Key_Numpad_7 Key_Numpad_8 "
+             "Key_Numpad_9 Key_O Key_P Key_PageDown Key_PageUp Key_Q Key_R Key_RightArrow Key_RightBracket "
+             "Key_RightControl Key_RightShift Key_S Key_Slash Key_Space Key_T Key_Tab Key_U Key_UpArrow "
+             "Key_V Key_W Key_X Key_Y Key_Z").split()
+
+
+class BindsTests(unittest.TestCase):
+    def setUp(self):
+        self.binding = B.parse_binds(BINDS_XML)
+
+    def test_header_and_axes_ignored(self):
+        self.assertEqual(self.binding["preset"], "Custom")
+        self.assertEqual(self.binding["version"], "4.1")
+        self.assertEqual(self.binding["layout"], "en-US")
+        self.assertNotIn("YawAxisRaw", self.binding["actions"])
+        self.assertNotIn("MouseXMode", self.binding["actions"])
+
+    def test_primary_with_modifier(self):
+        chord = B.keyboard_chord(self.binding, "LandingGearToggle")
+        self.assertEqual(B.chord_keys(chord), ["Key_RightShift", "Key_L"])
+
+    def test_secondary_used_when_primary_is_joystick(self):
+        self.assertEqual(B.chord_keys(B.keyboard_chord(self.binding, "DeployHardpointToggle")), ["Key_U"])
+
+    def test_unbound_and_non_keyboard_modifier(self):
+        self.assertIsNone(B.keyboard_chord(self.binding, "Supercruise"))
+        self.assertIsNone(B.keyboard_chord(self.binding, "EjectAllCargo"))
+        self.assertIsNone(B.keyboard_chord(self.binding, "NoSuchAction"))
+        self.assertEqual(self.binding["actions"]["Supercruise"], {"primary": None, "secondary": None})
+
+    def test_find_binds_file_prefers_active_preset_and_watcher_reparses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "Other.4.1.binds").write_text(BINDS_XML.replace('PresetName="Custom"', 'PresetName="Other"'), encoding="utf-8")
+            (folder / "Custom.4.1.binds").write_text(BINDS_XML, encoding="utf-8")
+            (folder / "StartPreset.4.start").write_text("Custom\nCustom\nCustom\nKeyboardMouseOnly\n", encoding="utf-8")
+            self.assertEqual(B.find_binds_file(folder).name, "Custom.4.1.binds")
+            watcher = B.BindsWatcher(folder)
+            self.assertEqual(watcher.load()["preset"], "Custom")
+            path = folder / "Custom.4.1.binds"
+            path.write_text(BINDS_XML.replace("Key_L", "Key_G"), encoding="utf-8")
+            os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+            self.assertEqual(B.chord_keys(B.keyboard_chord(watcher.load(), "LandingGearToggle")), ["Key_RightShift", "Key_G"])
+            self.assertEqual(watcher.summary()["actions"], 6)
+        self.assertIsNone(B.find_binds_file(Path(tmp) / "missing"))
+
+
+class ScancodeTests(unittest.TestCase):
+    def test_every_key_in_the_users_binds_is_mapped(self):
+        self.assertEqual(S.unmapped(USER_KEYS), [])
+
+    def test_extended_keys(self):
+        self.assertEqual(S.scancode("Key_RightControl"), (0x1D, True))
+        self.assertEqual(S.scancode("Key_LeftControl"), (0x1D, False))
+        self.assertEqual(S.scancode("Key_Insert"), (0x52, True))
+        self.assertEqual(S.scancode("Key_Numpad_0"), (0x52, False))
+        self.assertIsNone(S.scancode("Joy_2"))
+
+
+class ValidationTests(unittest.TestCase):
+    def test_defaults_are_valid_and_disabled(self):
+        for macro in M.DEFAULT_MACROS:
+            self.assertEqual(M.validate_macro(macro), [], macro["name"])
+            self.assertFalse(macro["enabled"])
+
+    def test_limits(self):
+        too_many = {"name": "x", "steps": [{"wait": 10}] * (M.MAX_STEPS + 1)}
+        self.assertTrue(any("too many" in p for p in M.validate_macro(too_many)))
+        self.assertTrue(any("timeout_ms" in p for p in M.validate_macro({"name": "x", "steps": [{"wait_until": "Docked"}]})))
+        self.assertTrue(any("runtime" in p for p in M.validate_macro(
+            {"name": "x", "steps": [{"wait": M.MAX_WAIT_MS}] * 4})))
+        self.assertTrue(any("exactly one" in p for p in M.validate_macro({"name": "x", "steps": [{"press": "A", "wait": 1}]})))
+        self.assertEqual(M.validate_macro({"name": "", "steps": []}), ["macro needs a name"])
+
+    def test_storage_roundtrip_writes_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "macros.json"
+            macros = M.load_macros(path)
+            self.assertEqual([m["name"] for m in macros], [m["name"] for m in M.DEFAULT_MACROS])
+            macros[0]["enabled"] = True
+            M.save_macros(macros, path)
+            self.assertTrue(M.load_macros(path)[0]["enabled"])
+            path.write_text("not json", encoding="utf-8")
+            self.assertEqual(M.load_macros(path), [])
+
+
+class EngineTests(unittest.TestCase):
+    def setUp(self):
+        self.binding = B.parse_binds(BINDS_XML)
+        self.flags = set()
+        self.focused = True
+        self.sender = M.FakeSender()
+        self.now = [0.0]
+        self.engine = M.MacroEngine(self.sender, lambda: set(self.flags), lambda: self.focused,
+                                    lambda: self.binding, sleep=self._sleep, clock=lambda: self.now[0])
+
+    def _sleep(self, seconds):
+        self.now[0] += seconds
+
+    def test_conditional_press_and_wait_until(self):
+        macro = {"name": "gear", "steps": [{"if_flag": "LandingGearDown", "is": False, "press": "LandingGearToggle"},
+                                           {"wait_until": "LandingGearDown", "is": True, "timeout_ms": 1000}]}
+        original = self.sender.press_chord
+
+        def press_then_flag(keys, hold_ms=60):
+            original(keys, hold_ms)
+            self.flags.add("LandingGearDown")
+        self.sender.press_chord = press_then_flag
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.sender.pressed, [(["Key_RightShift", "Key_L"], 60)])
+        # gear already down: press skipped, wait satisfied immediately
+        self.sender.pressed.clear()
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.sender.pressed, [])
+        self.assertIn("skip", result["log"][0])
+
+    def test_wait_timeout_aborts(self):
+        macro = {"name": "t", "steps": [{"wait_until": "Docked", "timeout_ms": 500}]}
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("timeout", result["error"])
+
+    def test_focus_loss_and_cancel_abort(self):
+        macro = {"name": "w", "steps": [{"wait": 1000}, {"press": "ShipSpotLightToggle"}]}
+        self.focused = False
+        self.assertIn("not focused", self.engine.run(macro)["error"])
+        self.focused = True
+        calls = {"n": 0}
+
+        def lose_focus_later():
+            calls["n"] += 1
+            return calls["n"] < 5
+        self.engine.focus_check = lose_focus_later
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("focus", result["error"])
+        self.assertEqual(self.sender.pressed, [])
+
+        self.engine.focus_check = lambda: True
+        self.engine._cancel.set()
+        self.assertEqual(self.engine.run(macro)["ok"], True)  # run clears a stale cancel first
+        polls = {"n": 0}
+
+        def cancel_during_wait(seconds):
+            polls["n"] += 1
+            if polls["n"] == 3:
+                self.engine.cancel()
+            self._sleep(seconds)
+        self.engine.sleep = cancel_during_wait
+        result = self.engine.run(macro)
+        self.assertEqual(result["error"], "cancelled")
+
+    def test_unbound_action_and_dry_run(self):
+        result = self.engine.run({"name": "u", "steps": [{"press": "Supercruise"}]})
+        self.assertIn("no keyboard binding", result["error"])
+        self.focused = False
+        result = self.engine.run({"name": "d", "steps": [{"press": "ShipSpotLightToggle"}]}, dry_run=True)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(self.sender.pressed, [])
+
+    def test_invalid_macro_rejected_before_running(self):
+        result = self.engine.run({"name": "bad", "steps": [{"wait_until": "Docked"}]})
+        self.assertEqual(result["error"], "invalid macro")
+
+
+class EndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        folder = Path(self.tmp.name)
+        (folder / "Custom.4.1.binds").write_text(BINDS_XML, encoding="utf-8")
+        cmdkeys._runtime.update(watcher=B.BindsWatcher(folder), engine=None, enabled=False)
+        self.addCleanup(lambda: cmdkeys._runtime.update(watcher=None, engine=None, enabled=False))
+        self.env = patch.dict(os.environ, {"EDGPT_DATA_DIR": self.tmp.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.flags = patch.object(cmdkeys, "_status_flags", return_value={"Docked"})
+        self.flags.start()
+        self.addCleanup(self.flags.stop)
+
+    def test_list_and_bindings(self):
+        listing = cmdkeys.list_macros({})
+        json.dumps(listing)
+        self.assertFalse(listing["injection_enabled"])
+        self.assertEqual(listing["binds"]["actions"], 6)
+        names = [m["name"] for m in listing["macros"]]
+        self.assertIn("Gear down", names)
+        prepare = next(m for m in listing["macros"] if m["name"] == "Prepare to land")
+        self.assertEqual(prepare["problems"], [])
+        self.assertEqual(prepare["unbound_actions"], [])
+        one = cmdkeys.bindings({"action": ["LandingGearToggle"]})
+        self.assertEqual(one["keys"], ["Key_RightShift", "Key_L"])
+        self.assertIsNone(cmdkeys.bindings({"action": ["Supercruise"]})["keys"])
+
+    def test_run_is_gated(self):
+        fake = M.FakeSender()
+        cmdkeys._runtime["engine"] = M.MacroEngine(fake, cmdkeys._status_flags, lambda: True,
+                                                   cmdkeys._watcher().load)
+        self.assertIn("disabled", cmdkeys.run({}, {"macro": "Gear down"})["error"])
+        self.assertTrue(cmdkeys.run({}, {"macro": "Gear down", "dry_run": True})["ok"])
+        self.assertEqual(fake.pressed, [])
+        with self.assertRaises(ValueError):
+            cmdkeys.enable({}, {"enabled": "yes"})
+        self.assertTrue(cmdkeys.enable({}, {"enabled": True})["injection_enabled"])
+        self.assertIn("disabled in macros.json", cmdkeys.run({}, {"macro": "Gear down"})["error"])
+        macros = M.load_macros()
+        macros[0]["enabled"] = True
+        M.save_macros(macros)
+        result = cmdkeys.run({}, {"macro": "Gear down"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(fake.pressed, [(["Key_RightShift", "Key_L"], 60)])
+        with self.assertRaises(ValueError):
+            cmdkeys.run({}, {"macro": "nope"})
+        self.assertFalse(cmdkeys.cancel({}, {})["cancelled"])
+        self.assertFalse(cmdkeys.enable({}, {"enabled": False})["injection_enabled"])
+
+    def test_engine_creation_does_not_deadlock(self):
+        import threading
+        done = threading.Event()
+        holder = {}
+
+        def build():
+            with patch("modules.cmdkeys.sendinput.game_focused", lambda: False):
+                holder["engine"] = cmdkeys._engine()
+            done.set()
+        threading.Thread(target=build, daemon=True).start()
+        self.assertTrue(done.wait(5), "cmdkeys._engine() deadlocked")
+        self.assertIs(holder["engine"], cmdkeys._engine())
+
+    def test_mcp_tools_are_read_only(self):
+        self.assertEqual(set(cmdkeys.MCP_TOOLS), {cmdkeys.get_command_macros, cmdkeys.get_key_binding})
+        self.assertNotIn("/cmdkeys/run", cmdkeys.HTTP_ROUTES)
+
+
+if __name__ == "__main__":
+    unittest.main()

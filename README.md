@@ -188,6 +188,7 @@ get_exobio_status
 get_exobio_body
 get_exobio_system_overview
 get_command_macros
+get_key_binding
 get_industry_summary
 ```
 

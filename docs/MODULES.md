@@ -9,8 +9,30 @@ listeners, threads or touch the filesystem at import time.
 | Module | HTTP routes | MCP tools | Status |
 | --- | --- | --- | --- |
 | `exobio` | `/exobio`, `/exobio/body`, `/exobio/overview` | `get_exobio_status`, `get_exobio_body`, `get_exobio_system_overview` | Working |
-| `cmdkeys` | `/cmdkeys` | `get_command_macros` | Scaffold |
+| `cmdkeys` | `/cmdkeys`, `/cmdkeys/binds`, `/cmdkeys/page`; POST `/cmdkeys/enable`, `/cmdkeys/run`, `/cmdkeys/cancel` | `get_command_macros`, `get_key_binding` | Working (no global hotkeys yet) |
 | `industry` | `/industry` | `get_industry_summary` | Scaffold |
+
+## cmdkeys
+
+Parses the active `.binds` file (preset from `StartPreset.4.start`, re-read on
+change), resolves actions to keyboard chords, and runs small state-reactive
+macros with Win32 `SendInput` scancodes. Open `/cmdkeys/page` on a second
+screen for the button grid with live `Status.json` flags.
+
+Macro steps (`data/macros.json`, defaults written disabled):
+`{"press": "<Action>", "hold_ms": 60}`, `{"wait": <ms>}`,
+`{"wait_until": "<Flag>", "is": true, "timeout_ms": <ms>}`; any step may add
+`"if_flag": "<Flag>", "is": true|false` to run only in that state.
+
+Safety: injection is OFF at startup and enabled per process by POST
+`/cmdkeys/enable`; each macro is opt-in; 12 steps / 30 s caps; every wait has
+a timeout; one macro at a time; CANCEL aborts; keys go out only while
+`EliteDangerous64.exe` is the foreground window; POST routes accept loopback
+clients only; MCP tools are read-only. Frontier's position on input automation
+is not clearly stated. Use at your own risk.
+
+Not yet: global hotkeys (needs a Win32 message loop thread), macro editing UI
+(edit `macros.json`), joystick/mouse bindings (keyboard chords only).
 
 ## exobio
 

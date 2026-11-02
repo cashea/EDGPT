@@ -26,6 +26,9 @@ class ModuleRegistryTests(unittest.TestCase):
                 payload = handler({})
             except ValueError:
                 continue  # missing required query parameter -> HTTP 400 path
+            if isinstance(payload, modules.Html):
+                self.assertTrue(payload.lstrip().startswith("<!DOCTYPE html>"))
+                continue
             json.dumps(payload)  # must be serializable
             self.assertIn("module", payload)
         self.assertIsNone(modules.http_route("/nope"))
@@ -42,7 +45,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_module_info_shape(self):
         for entry in modules.module_info():
-            self.assertEqual(set(entry), {"name", "http_routes", "mcp_tools"})
+            self.assertEqual(set(entry), {"name", "http_routes", "http_post_routes", "mcp_tools"})
 
 
 if __name__ == "__main__":

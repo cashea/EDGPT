@@ -219,12 +219,45 @@ class Handler(BaseHTTPRequestHandler):
         module_handler = modules.http_route(path)
         if module_handler is not None:
             try:
-                return send_json(self, module_handler(qs))
+                result = module_handler(qs)
             except ValueError as exc:
                 return send_json(self, {"error": str(exc)}, 400)
+            if isinstance(result, modules.Html):
+                body = str(result).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            return send_json(self, result)
 
         self.send_response(404)
         self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        handler = modules.http_post_route(parsed.path)
+        if handler is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            return send_json(self, {"error": "local requests only"}, 403)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            body = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+            if not isinstance(body, dict):
+                raise ValueError("JSON body must be an object")
+        except (ValueError, UnicodeDecodeError) as exc:
+            return send_json(self, {"error": f"bad request body: {exc}"}, 400)
+        try:
+            return send_json(self, handler(qs, body))
+        except ValueError as exc:
+            return send_json(self, {"error": str(exc)}, 400)
 
     def log_message(self, format, *args):
         pass

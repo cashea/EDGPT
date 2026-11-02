@@ -5,11 +5,20 @@ Each module is a package under ``bin/modules`` exposing:
 - ``NAME``: short identifier, unique.
 - ``HTTP_ROUTES``: ``{"/path": handler}``; ``handler(qs: dict) -> JSON-able``.
 - ``MCP_TOOLS``: list of plain functions registered with FastMCP as tools.
+- ``HTTP_POST_ROUTES`` (optional): ``{"/path": handler}``; ``handler(qs, body) -> JSON-able``
+  where ``body`` is the parsed JSON request body (``{}`` when empty). POST routes are for
+  local user actions only and are never exposed as MCP tools.
+- A GET handler may return ``Html(str)`` to serve a page instead of JSON.
 
 Modules must not start threads, listeners, or touch the filesystem at import
 time (same rule as the rest of EDGPT). Input injection lives only in cmdkeys.
 """
 import importlib
+
+
+class Html(str):
+    """Return this from a GET handler to send text/html instead of JSON."""
+
 
 MODULE_NAMES = ("exobio", "cmdkeys", "industry")
 
@@ -47,6 +56,20 @@ def http_route(path):
     return http_routes().get(path)
 
 
+def http_post_routes():
+    routes = {}
+    for mod in load_modules():
+        for path, handler in getattr(mod, "HTTP_POST_ROUTES", {}).items():
+            if path in routes:
+                raise ValueError(f"duplicate HTTP POST route {path!r} in module {mod.NAME!r}")
+            routes[path] = handler
+    return routes
+
+
+def http_post_route(path):
+    return http_post_routes().get(path)
+
+
 def register_mcp_tools(mcp):
     """Attach every module's MCP tools to a FastMCP instance; returns tool names."""
     names = []
@@ -61,5 +84,6 @@ def module_info():
     """Summary used by /capabilities-style discovery."""
     return [{"name": mod.NAME,
              "http_routes": sorted(mod.HTTP_ROUTES),
+             "http_post_routes": sorted(getattr(mod, "HTTP_POST_ROUTES", {})),
              "mcp_tools": [f.__name__ for f in mod.MCP_TOOLS]}
             for mod in load_modules()]
