@@ -11,8 +11,21 @@ MAX_STEPS = 12
 MAX_RUNTIME_MS = 30_000
 MAX_WAIT_MS = 10_000
 DEFAULT_HOLD_MS = 60
+DEFAULT_GAP_MS = 120   # pause after each press so the game registers consecutive keys
 POLL_MS = 50
 MACROS_FILE_NAME = "macros.json"
+
+# Status.json GuiFocus -> pseudo flag "GuiFocus:<name>" usable in if_flag / wait_until.
+GUI_FOCUS_FLAGS = ("NoFocus", "InternalPanel", "ExternalPanel", "CommsPanel", "RolePanel",
+                   "StationServices", "GalaxyMap", "SystemMap", "Orrery", "FSS", "DSS", "Codex")
+
+
+def gui_focus_flag(value):
+    """``"GuiFocus:StationServices"`` for 5, ``None`` for unknown or non-integer values."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < len(GUI_FOCUS_FLAGS):
+        return None
+    return "GuiFocus:" + GUI_FOCUS_FLAGS[value]
+
 
 DEFAULT_MACROS = [
     {"name": "Gear down", "enabled": False, "description": "Lower landing gear if it is up.",
@@ -38,6 +51,16 @@ DEFAULT_MACROS = [
                {"if_flag": "LightsOn", "is": False, "press": "ShipSpotLightToggle"},
                {"if_flag": "LandingGearDown", "is": False, "press": "LandingGearToggle"},
                {"wait_until": "LandingGearDown", "is": True, "timeout_ms": 4000}]},
+    {"name": "Open Starport Services", "enabled": False,
+     "description": "Docked, no panel open: park the station menu on its bottom row (it clamps, never wraps), "
+                    "go up two rows to STARPORT SERVICES, select, then confirm GuiFocus=StationServices. "
+                    "Never touches AUTO LAUNCH or DISEMBARK. Leave with UI_Back.",
+     "steps": [{"wait_until": "Docked", "timeout_ms": 100},
+               {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 100},
+               {"press": "UI_Down"}, {"press": "UI_Down"}, {"press": "UI_Down"}, {"press": "UI_Down"},
+               {"press": "UI_Up"}, {"press": "UI_Up"},
+               {"press": "UI_Select"},
+               {"wait_until": "GuiFocus:StationServices", "timeout_ms": 5000}]},
 ]
 
 
@@ -75,7 +98,10 @@ def validate_macro(macro):
             hold = step.get("hold_ms", DEFAULT_HOLD_MS)
             if not isinstance(hold, int) or not 0 <= hold <= 2000:
                 problems.append(f"step {index}: hold_ms must be 0-2000")
-            budget += (hold if isinstance(hold, int) else 0) + 50
+            gap = step.get("gap_ms", DEFAULT_GAP_MS)
+            if not isinstance(gap, int) or not 0 <= gap <= 2000:
+                problems.append(f"step {index}: gap_ms must be 0-2000")
+            budget += (hold if isinstance(hold, int) else 0) + (gap if isinstance(gap, int) else 0) + 50
         elif kind == "wait":
             ms = step["wait"]
             if not isinstance(ms, int) or not 0 <= ms <= MAX_WAIT_MS:
@@ -204,6 +230,7 @@ class MacroEngine:
                     if not dry_run:
                         self.sender.press_chord(keys, step.get("hold_ms", DEFAULT_HOLD_MS))
                     log.append(f"{index}: press {step['press']} -> {'+'.join(keys)}")
+                    self._sleep_checked(step.get("gap_ms", DEFAULT_GAP_MS) / 1000.0, dry_run)
                 elif "wait" in step:
                     self._sleep_checked(step["wait"] / 1000.0, dry_run)
                     log.append(f"{index}: wait {step['wait']} ms")

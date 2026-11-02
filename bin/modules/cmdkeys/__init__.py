@@ -24,7 +24,11 @@ def _status_flags():
     from current_state import read_json_file
     from status_flags import decode_status_flags
     status = decode_status_flags(read_json_file("Status.json")) or {}
-    return set(status.get("FlagsDecoded", [])) | set(status.get("Flags2Decoded", []))
+    flags = set(status.get("FlagsDecoded", [])) | set(status.get("Flags2Decoded", []))
+    focus = M.gui_focus_flag(status.get("GuiFocus"))
+    if focus:
+        flags.add(focus)
+    return flags
 
 
 def _watcher():

@@ -51,6 +51,22 @@ BINDS_XML = """<?xml version="1.0" encoding="UTF-8" ?>
 \t\t</Primary>
 \t\t<Secondary Device="{NoDevice}" Key="" />
 \t</EjectAllCargo>
+	<UI_Up>
+		<Primary Device="Keyboard" Key="Key_F5" />
+		<Secondary Device="{NoDevice}" Key="" />
+	</UI_Up>
+	<UI_Down>
+		<Primary Device="Keyboard" Key="Key_F6" />
+		<Secondary Device="{NoDevice}" Key="" />
+	</UI_Down>
+	<UI_Select>
+		<Primary Device="Keyboard" Key="Key_F9" />
+		<Secondary Device="{NoDevice}" Key="" />
+	</UI_Select>
+	<UI_Back>
+		<Primary Device="Mouse" Key="Mouse_4" />
+		<Secondary Device="Keyboard" Key="Key_F10" />
+	</UI_Back>
 </Root>
 """
 
@@ -101,7 +117,7 @@ class BindsTests(unittest.TestCase):
             path.write_text(BINDS_XML.replace("Key_L", "Key_G"), encoding="utf-8")
             os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
             self.assertEqual(B.chord_keys(B.keyboard_chord(watcher.load(), "LandingGearToggle")), ["Key_RightShift", "Key_G"])
-            self.assertEqual(watcher.summary()["actions"], 6)
+            self.assertEqual(watcher.summary()["actions"], 10)
         self.assertIsNone(B.find_binds_file(Path(tmp) / "missing"))
 
 
@@ -221,6 +237,55 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertEqual(self.sender.pressed, [])
 
+    def test_gui_focus_flag_mapping(self):
+        self.assertEqual(M.gui_focus_flag(0), "GuiFocus:NoFocus")
+        self.assertEqual(M.gui_focus_flag(5), "GuiFocus:StationServices")
+        self.assertIsNone(M.gui_focus_flag(99))
+        self.assertIsNone(M.gui_focus_flag(True))
+        self.assertIsNone(M.gui_focus_flag(None))
+
+    def test_press_gap_is_applied_and_validated(self):
+        macro = {"name": "two", "steps": [{"press": "UI_Down"}, {"press": "UI_Down", "gap_ms": 500}]}
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"], result)
+        self.assertAlmostEqual(self.now[0], (M.DEFAULT_GAP_MS + 500) / 1000.0, places=3)
+        self.assertIn("gap_ms must be 0-2000", M.validate_macro({"name": "x", "steps": [{"press": "UI_Down", "gap_ms": 9000}]})[0])
+
+    def test_open_starport_services_macro(self):
+        macro = next(m for m in M.DEFAULT_MACROS if m["name"] == "Open Starport Services")
+        self.assertEqual(M.validate_macro(macro), [])
+        # not docked -> aborts before any key is sent
+        self.flags = {"GuiFocus:NoFocus"}
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("Docked", result["error"])
+        self.assertEqual(self.sender.pressed, [])
+        # docked but a side panel is open -> aborts, nothing sent
+        self.flags = {"Docked", "GuiFocus:InternalPanel"}
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("GuiFocus:NoFocus", result["error"])
+        self.assertEqual(self.sender.pressed, [])
+        # docked, cockpit view: 4x down, 2x up, select; station services appears after the select
+        self.flags = {"Docked", "GuiFocus:NoFocus"}
+        original = self.sender.press_chord
+
+        def press_then_focus(keys, hold_ms=60):
+            original(keys, hold_ms)
+            if keys == ["Key_F9"]:
+                self.flags = {"Docked", "GuiFocus:StationServices"}
+        self.sender.press_chord = press_then_focus
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([k for k, _ in self.sender.pressed],
+                         [["Key_F6"]] * 4 + [["Key_F5"]] * 2 + [["Key_F9"]])
+        # select never opens the menu -> timeout, reported
+        self.sender.press_chord = original
+        self.flags = {"Docked", "GuiFocus:NoFocus"}
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("GuiFocus:StationServices", result["error"])
+
     def test_invalid_macro_rejected_before_running(self):
         result = self.engine.run({"name": "bad", "steps": [{"wait_until": "Docked"}]})
         self.assertEqual(result["error"], "invalid macro")
@@ -245,7 +310,7 @@ class EndpointTests(unittest.TestCase):
         listing = cmdkeys.list_macros({})
         json.dumps(listing)
         self.assertFalse(listing["injection_enabled"])
-        self.assertEqual(listing["binds"]["actions"], 6)
+        self.assertEqual(listing["binds"]["actions"], 10)
         names = [m["name"] for m in listing["macros"]]
         self.assertIn("Gear down", names)
         prepare = next(m for m in listing["macros"] if m["name"] == "Prepare to land")
