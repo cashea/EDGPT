@@ -69,6 +69,16 @@ DEFAULT_MACROS = [
                {"if_flag": "GuiFocus:StationServices", "is": True, "press": "UI_Back"}, {"wait": 600},
                {"if_flag": "GuiFocus:StationServices", "is": True, "press": "UI_Back"},
                {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 3000}]},
+    {"name": "Open galaxy map", "enabled": False,
+     "description": "From the cockpit view, press GalaxyMapOpen and confirm GuiFocus=GalaxyMap.",
+     "steps": [{"wait_until": "GuiFocus:NoFocus", "timeout_ms": 100},
+               {"press": "GalaxyMapOpen"},
+               {"wait_until": "GuiFocus:GalaxyMap", "timeout_ms": 8000}]},
+    {"name": "Close galaxy map", "enabled": False,
+     "description": "With the galaxy map open, press GalaxyMapOpen again (it toggles) and confirm the cockpit view.",
+     "steps": [{"wait_until": "GuiFocus:GalaxyMap", "timeout_ms": 100},
+               {"press": "GalaxyMapOpen"},
+               {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 5000}]},
 ]
 
 

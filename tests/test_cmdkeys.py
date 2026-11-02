@@ -51,6 +51,10 @@ BINDS_XML = """<?xml version="1.0" encoding="UTF-8" ?>
 \t\t</Primary>
 \t\t<Secondary Device="{NoDevice}" Key="" />
 \t</EjectAllCargo>
+	<GalaxyMapOpen>
+		<Primary Device="Keyboard" Key="Key_F11" />
+		<Secondary Device="{NoDevice}" Key="" />
+	</GalaxyMapOpen>
 	<UI_Up>
 		<Primary Device="Keyboard" Key="Key_F5" />
 		<Secondary Device="{NoDevice}" Key="" />
@@ -117,7 +121,7 @@ class BindsTests(unittest.TestCase):
             path.write_text(BINDS_XML.replace("Key_L", "Key_G"), encoding="utf-8")
             os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
             self.assertEqual(B.chord_keys(B.keyboard_chord(watcher.load(), "LandingGearToggle")), ["Key_RightShift", "Key_G"])
-            self.assertEqual(watcher.summary()["actions"], 10)
+            self.assertEqual(watcher.summary()["actions"], 11)
         self.assertIsNone(B.find_binds_file(Path(tmp) / "missing"))
 
 
@@ -309,6 +313,25 @@ class EngineTests(unittest.TestCase):
         self.assertEqual([k for k, _ in self.sender.pressed], [["Key_F10"], ["Key_F10"]])
         self.assertTrue(any("skip" in line for line in result["log"]))
 
+    def test_galaxy_map_macros(self):
+        open_map = next(m for m in M.DEFAULT_MACROS if m["name"] == "Open galaxy map")
+        close_map = next(m for m in M.DEFAULT_MACROS if m["name"] == "Close galaxy map")
+        original = self.sender.press_chord
+
+        def toggle(keys, hold_ms=60):
+            original(keys, hold_ms)
+            self.flags = {"GuiFocus:NoFocus"} if "GuiFocus:GalaxyMap" in self.flags else {"GuiFocus:GalaxyMap"}
+        self.sender.press_chord = toggle
+        self.flags = {"GuiFocus:GalaxyMap"}
+        self.assertFalse(self.engine.run(open_map)["ok"])      # already open -> abort, nothing sent
+        self.assertEqual(self.sender.pressed, [])
+        self.flags = {"GuiFocus:NoFocus"}
+        self.assertTrue(self.engine.run(open_map)["ok"])
+        self.assertEqual(self.flags, {"GuiFocus:GalaxyMap"})
+        self.assertTrue(self.engine.run(close_map)["ok"])
+        self.assertEqual(self.flags, {"GuiFocus:NoFocus"})
+        self.assertEqual([k for k, _ in self.sender.pressed], [["Key_F11"], ["Key_F11"]])
+
     def test_invalid_macro_rejected_before_running(self):
         result = self.engine.run({"name": "bad", "steps": [{"wait_until": "Docked"}]})
         self.assertEqual(result["error"], "invalid macro")
@@ -333,7 +356,7 @@ class EndpointTests(unittest.TestCase):
         listing = cmdkeys.list_macros({})
         json.dumps(listing)
         self.assertFalse(listing["injection_enabled"])
-        self.assertEqual(listing["binds"]["actions"], 10)
+        self.assertEqual(listing["binds"]["actions"], 11)
         names = [m["name"] for m in listing["macros"]]
         self.assertIn("Gear down", names)
         prepare = next(m for m in listing["macros"] if m["name"] == "Prepare to land")
