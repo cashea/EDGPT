@@ -13,6 +13,7 @@ import modules.cmdkeys as cmdkeys
 from modules.cmdkeys import binds as B
 from modules.cmdkeys import macros as M
 from modules.cmdkeys import scancodes as S
+from modules.cmdkeys import screen as SC
 
 BINDS_XML = """<?xml version="1.0" encoding="UTF-8" ?>
 <Root PresetName="Custom" MajorVersion="4" MinorVersion="1">
@@ -51,6 +52,14 @@ BINDS_XML = """<?xml version="1.0" encoding="UTF-8" ?>
 \t\t</Primary>
 \t\t<Secondary Device="{NoDevice}" Key="" />
 \t</EjectAllCargo>
+	<FocusRightPanel>
+		<Primary Device="Keyboard" Key="Key_4" />
+		<Secondary Device="{NoDevice}" Key="" />
+	</FocusRightPanel>
+	<CycleNextPanel>
+		<Primary Device="Keyboard" Key="Key_E" />
+		<Secondary Device="{NoDevice}" Key="" />
+	</CycleNextPanel>
 	<GalaxyMapOpen>
 		<Primary Device="Keyboard" Key="Key_F11" />
 		<Secondary Device="{NoDevice}" Key="" />
@@ -121,7 +130,7 @@ class BindsTests(unittest.TestCase):
             path.write_text(BINDS_XML.replace("Key_L", "Key_G"), encoding="utf-8")
             os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
             self.assertEqual(B.chord_keys(B.keyboard_chord(watcher.load(), "LandingGearToggle")), ["Key_RightShift", "Key_G"])
-            self.assertEqual(watcher.summary()["actions"], 11)
+            self.assertEqual(watcher.summary()["actions"], 13)
         self.assertIsNone(B.find_binds_file(Path(tmp) / "missing"))
 
 
@@ -332,6 +341,67 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.flags, {"GuiFocus:NoFocus"})
         self.assertEqual([k for k, _ in self.sender.pressed], [["Key_F11"], ["Key_F11"]])
 
+    def test_screen_steps_need_a_probe_and_validate(self):
+        self.assertEqual(SC.parse_expectation("right_panel_tab=Inventory"), ("right_panel_tab", "Inventory"))
+        self.assertIsNone(SC.parse_expectation("right_panel_tab=Nope"))
+        self.assertIsNone(SC.parse_expectation("bogus=Inventory"))
+        self.assertIsNone(SC.parse_expectation(42))
+        problems = M.validate_macro({"name": "x", "steps": [
+            {"expect_screen": "right_panel_tab=Nope"},
+            {"until_screen": "right_panel_tab=Inventory", "press": "CycleNextPanel"},
+            {"until_screen": "right_panel_tab=Inventory", "press": "CycleNextPanel", "max_presses": 99}]})
+        self.assertEqual(len(problems), 3, problems)
+        # engine without a probe refuses screen steps (but dry-runs them)
+        macro = {"name": "x", "steps": [{"expect_screen": "right_panel_tab=Inventory"}]}
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("not available", result["error"])
+        self.assertFalse(self.engine.run(macro, dry_run=True)["ok"])   # None != Inventory, reported
+
+    def test_screen_evaluate_on_synthetic_pixels(self):
+        box = SC.PROBES["right_panel_tab"]["Inventory"]
+        inside = lambda x, y: box[0] <= x < box[1] and box[2] <= y < box[3]
+        pixel_at = lambda x, y: (211, 133, 0) if inside(x, y) else (40, 15, 4)
+        self.assertEqual(SC.evaluate("right_panel_tab", pixel_at, SC.REFERENCE), "Inventory")
+        # half-resolution window: boxes scale down with it
+        half = lambda x, y: pixel_at(x * 2, y * 2)
+        self.assertEqual(SC.evaluate("right_panel_tab", half, (1280, 720)), "Inventory")
+        # nothing highlighted -> None; two highlighted -> ambiguous -> None
+        self.assertIsNone(SC.evaluate("right_panel_tab", lambda x, y: (40, 15, 4), SC.REFERENCE))
+        self.assertIsNone(SC.evaluate("right_panel_tab", lambda x, y: (211, 133, 0), SC.REFERENCE))
+
+    def test_open_inventory_tab_macro(self):
+        macro = next(m for m in M.DEFAULT_MACROS if m["name"] == "Open inventory tab")
+        self.assertEqual(M.validate_macro(macro), [])
+        tabs = ["Home", "Modules", "FireGroups", "Ship", "Inventory", "Storage", "Status", "Playlist"]
+        state = {"tab": 6}   # panel was left on Status
+        self.engine.screen_probe = lambda probe: tabs[state["tab"]]
+        original = self.sender.press_chord
+
+        def press(keys, hold_ms=60):
+            original(keys, hold_ms)
+            if keys == ["Key_4"]:
+                self.flags = {"Docked", "GuiFocus:InternalPanel"}
+            elif keys == ["Key_E"]:
+                state["tab"] = (state["tab"] + 1) % len(tabs)
+        self.sender.press_chord = press
+        self.flags = {"Docked", "GuiFocus:NoFocus"}
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"], result)
+        # opened the panel, then Status -> Playlist -> Home -> ... -> Inventory = 6 presses of E
+        self.assertEqual([k for k, _ in self.sender.pressed], [["Key_4"]] + [["Key_E"]] * 6)
+        self.assertIn("after 6 x CycleNextPanel", " ".join(result["log"]))
+        # already on Inventory with the panel open: no key at all
+        self.sender.pressed.clear()
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.sender.pressed, [])
+        # probe never sees Inventory (e.g. wrong resolution): stops after max_presses and reports it
+        self.engine.screen_probe = lambda probe: None
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("after 8 presses", result["error"])
+
     def test_invalid_macro_rejected_before_running(self):
         result = self.engine.run({"name": "bad", "steps": [{"wait_until": "Docked"}]})
         self.assertEqual(result["error"], "invalid macro")
@@ -356,7 +426,7 @@ class EndpointTests(unittest.TestCase):
         listing = cmdkeys.list_macros({})
         json.dumps(listing)
         self.assertFalse(listing["injection_enabled"])
-        self.assertEqual(listing["binds"]["actions"], 11)
+        self.assertEqual(listing["binds"]["actions"], 13)
         names = [m["name"] for m in listing["macros"]]
         self.assertIn("Gear down", names)
         prepare = next(m for m in listing["macros"] if m["name"] == "Prepare to land")

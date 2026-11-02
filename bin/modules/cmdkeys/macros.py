@@ -6,12 +6,14 @@ import time
 from pathlib import Path
 
 from . import binds as B
+from . import screen as SC
 
 MAX_STEPS = 12
 MAX_RUNTIME_MS = 30_000
 MAX_WAIT_MS = 10_000
+MAX_SCREEN_PRESSES = 12
 DEFAULT_HOLD_MS = 60
-DEFAULT_GAP_MS = 120   # pause after each press so the game registers consecutive keys
+DEFAULT_GAP_MS = 50    # pause after each press; the game registers keys down to ~10 ms gaps (measured 2026-11-01)
 POLL_MS = 50
 MACROS_FILE_NAME = "macros.json"
 
@@ -79,6 +81,14 @@ DEFAULT_MACROS = [
      "steps": [{"wait_until": "GuiFocus:GalaxyMap", "timeout_ms": 100},
                {"press": "GalaxyMapOpen"},
                {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 5000}]},
+    {"name": "Open inventory tab", "enabled": False,
+     "description": "Open the right panel if needed, then cycle tabs with CycleNextPanel until the screen "
+                    "probe sees the Inventory tab highlighted (at most 8 presses).",
+     "steps": [{"if_flag": "GuiFocus:InternalPanel", "is": False, "press": "FocusRightPanel"},
+               {"wait_until": "GuiFocus:InternalPanel", "timeout_ms": 3000},
+               {"wait": 600},
+               {"until_screen": "right_panel_tab=Inventory", "press": "CycleNextPanel", "max_presses": 8, "gap_ms": 450},
+               {"expect_screen": "right_panel_tab=Inventory"}]},
 ]
 
 
@@ -105,12 +115,33 @@ def validate_macro(macro):
         if not isinstance(step, dict):
             problems.append(f"step {index}: not an object")
             continue
-        kinds = [k for k in ("press", "wait", "wait_until") if k in step]
+        kinds = [k for k in ("press", "wait", "wait_until", "expect_screen", "until_screen") if k in step]
+        if "until_screen" in kinds and "press" in kinds:
+            kinds.remove("press")   # until_screen carries its own press
         if len(kinds) != 1:
-            problems.append(f"step {index}: exactly one of press/wait/wait_until required")
+            problems.append(f"step {index}: exactly one of press/wait/wait_until/expect_screen/until_screen required")
             continue
         kind = kinds[0]
-        if kind == "press":
+        if kind == "expect_screen":
+            if SC.parse_expectation(step["expect_screen"]) is None:
+                problems.append(f"step {index}: expect_screen needs 'probe=label' from a known probe")
+        elif kind == "until_screen":
+            if SC.parse_expectation(step["until_screen"]) is None:
+                problems.append(f"step {index}: until_screen needs 'probe=label' from a known probe")
+            if not isinstance(step.get("press"), str) or not step.get("press"):
+                problems.append(f"step {index}: until_screen needs a press action")
+            limit = step.get("max_presses")
+            if not isinstance(limit, int) or not 1 <= limit <= MAX_SCREEN_PRESSES:
+                problems.append(f"step {index}: until_screen needs max_presses 1-{MAX_SCREEN_PRESSES}")
+            hold = step.get("hold_ms", DEFAULT_HOLD_MS)
+            gap = step.get("gap_ms", DEFAULT_GAP_MS)
+            if not isinstance(hold, int) or not 0 <= hold <= 2000:
+                problems.append(f"step {index}: hold_ms must be 0-2000")
+            if not isinstance(gap, int) or not 0 <= gap <= 2000:
+                problems.append(f"step {index}: gap_ms must be 0-2000")
+            per = (hold if isinstance(hold, int) else 0) + (gap if isinstance(gap, int) else 0) + 50
+            budget += per * (limit if isinstance(limit, int) else 1)
+        elif kind == "press":
             if not isinstance(step["press"], str) or not step["press"]:
                 problems.append(f"step {index}: press needs an action name")
             hold = step.get("hold_ms", DEFAULT_HOLD_MS)
@@ -193,8 +224,10 @@ class FakeSender:
 class MacroEngine:
     """Runs one macro at a time with cancellation, flag waits, focus guard and runtime cap."""
 
-    def __init__(self, sender, status_flags, focus_check, binding_provider, sleep=time.sleep, clock=time.monotonic):
+    def __init__(self, sender, status_flags, focus_check, binding_provider, sleep=time.sleep, clock=time.monotonic,
+                 screen_probe=None):
         self.sender = sender
+        self.screen_probe = screen_probe          # (probe_name) -> label | None; None = no screen access
         self.status_flags = status_flags          # () -> set of active flag names
         self.focus_check = focus_check            # () -> bool
         self.binding_provider = binding_provider  # () -> parsed binding dict
@@ -240,7 +273,7 @@ class MacroEngine:
                 if "if_flag" in step and ((step["if_flag"] in flags) != step.get("is", True)):
                     log.append(f"{index}: skip (flag {step['if_flag']} is {step['if_flag'] in flags})")
                     continue
-                if "press" in step:
+                if "press" in step and "until_screen" not in step:
                     chord = B.keyboard_chord(binding, step["press"])
                     if chord is None:
                         raise _Abort(f"action {step['press']} has no keyboard binding")
@@ -252,6 +285,31 @@ class MacroEngine:
                 elif "wait" in step:
                     self._sleep_checked(step["wait"] / 1000.0, dry_run)
                     log.append(f"{index}: wait {step['wait']} ms")
+                elif "expect_screen" in step:
+                    probe, want = SC.parse_expectation(step["expect_screen"])
+                    seen = self._probe(probe, dry_run)
+                    if seen != want:
+                        raise _Abort(f"screen check failed: {probe} is {seen!r}, expected {want!r}")
+                    log.append(f"{index}: screen {probe} is {want}")
+                elif "until_screen" in step:
+                    probe, want = SC.parse_expectation(step["until_screen"])
+                    chord = B.keyboard_chord(binding, step["press"])
+                    if chord is None:
+                        raise _Abort(f"action {step['press']} has no keyboard binding")
+                    keys = B.chord_keys(chord)
+                    presses = 0
+                    while True:
+                        seen = self._probe(probe, dry_run)
+                        if seen == want:
+                            break
+                        if presses >= step["max_presses"]:
+                            raise _Abort(f"{probe} still {seen!r} after {presses} presses of {step['press']}")
+                        if not dry_run:
+                            self._check(log)
+                            self.sender.press_chord(keys, step.get("hold_ms", DEFAULT_HOLD_MS))
+                        presses += 1
+                        self._sleep_checked(step.get("gap_ms", DEFAULT_GAP_MS) / 1000.0, dry_run)
+                    log.append(f"{index}: {probe} is {want} after {presses} x {step['press']}")
                 else:
                     want = step.get("is", True)
                     deadline = self.clock() + step["timeout_ms"] / 1000.0
@@ -272,6 +330,13 @@ class MacroEngine:
             self.last_result = result if "result" in locals() else None
             self._lock.release()
         return result
+
+    def _probe(self, probe, dry_run):
+        if self.screen_probe is None:
+            if dry_run:
+                return None
+            raise _Abort("screen probes are not available")
+        return self.screen_probe(probe)
 
     def _sleep_checked(self, seconds, dry_run):
         end = self.clock() + seconds

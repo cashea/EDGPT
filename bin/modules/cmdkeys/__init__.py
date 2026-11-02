@@ -42,7 +42,9 @@ def _engine():
     with _lock:
         if _runtime["engine"] is None:
             from .sendinput import Win32Sender, game_focused
-            _runtime["engine"] = M.MacroEngine(Win32Sender(), _status_flags, game_focused, _watcher().load)
+            from .screen import probe_game
+            _runtime["engine"] = M.MacroEngine(Win32Sender(), _status_flags, game_focused, _watcher().load,
+                                               screen_probe=probe_game)
         return _runtime["engine"]
 
 
