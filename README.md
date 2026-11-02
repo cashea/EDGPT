@@ -184,7 +184,14 @@ get_saved_system_map_simple
 get_saved_system_map_full
 get_current_system_summary
 get_saved_system_summary
+get_exobio_status
+get_exobio_body
+get_exobio_system_overview
+get_command_macros
+get_industry_summary
 ```
+
+The last five come from companion modules; see [docs/MODULES.md](docs/MODULES.md).
 
 `Status.json` responses preserve Frontier's numeric `Flags` and `Flags2` while
 also adding `FlagsDecoded`/`Flags2Decoded` name lists. Unknown active bit
