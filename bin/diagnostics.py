@@ -25,6 +25,11 @@ TOOLS = ["get_elite_state", "get_full_loadout", "get_navroute", "get_status",
          "get_edgpt_capabilities", "get_current_session_summary", "list_game_sessions", "get_game_session",
          "get_current_system_summary", "get_saved_system_summary"]
 
+# Companion modules (bin/modules) extend the contract additively.
+import modules as _modules
+ENDPOINTS += sorted(_modules.http_routes())
+TOOLS += [name for entry in _modules.module_info() for name in entry["mcp_tools"]]
+
 
 def version():
     return {"application": "EDGPT", "version": VERSION, "api_schema_version": 1,

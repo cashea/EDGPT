@@ -12,6 +12,7 @@ from map_page import render_map_page
 from system_map_store import get_current_system_map, get_system_map, list_system_maps
 from session_store import get_current_session_summary, get_game_session, list_game_sessions
 from system_map_store import get_system_summary
+import modules
 
 if __name__ == "__main__" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -214,6 +215,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        module_handler = modules.http_route(path)
+        if module_handler is not None:
+            try:
+                return send_json(self, module_handler(qs))
+            except ValueError as exc:
+                return send_json(self, {"error": str(exc)}, 400)
 
         self.send_response(404)
         self.end_headers()
