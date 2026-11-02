@@ -113,7 +113,7 @@ def enable(qs=None, body=None):
 
 
 def run(qs=None, body=None):
-    """``{"macro": "<name>", "dry_run": false}``. Blocks until the macro finishes (<= 30 s)."""
+    """``{"macro": "<name>", "dry_run": false, "params": {...}}``. Blocks until the macro finishes (<= 60 s)."""
     body = body or {}
     name = body.get("macro")
     macro = _find_macro(name) if isinstance(name, str) else None
@@ -125,7 +125,8 @@ def run(qs=None, body=None):
             return {"ok": False, "macro": name, "error": "key injection is disabled; POST /cmdkeys/enable first"}
         if not macro.get("enabled", False):
             return {"ok": False, "macro": name, "error": "macro is disabled in macros.json"}
-    return {"module": NAME, **_engine().run(macro, dry_run=dry_run)}
+    params = body.get("params") if isinstance(body.get("params"), dict) else None
+    return {"module": NAME, **_engine().run(macro, dry_run=dry_run, params=params)}
 
 
 def cancel(qs=None, body=None):

@@ -5,16 +5,24 @@ and scaled to the actual window size. A probe returns a label or ``None`` when n
 matches unambiguously, so macros can stop instead of guessing.
 """
 import ctypes
+import json
+import os
+import struct
+import subprocess
+import tempfile
 from ctypes import wintypes
+from pathlib import Path
 
 REFERENCE = (2560, 1440)
 HOT_MIN = 0.5      # fraction of bright-orange pixels for a box to count as highlighted
 OTHER_MAX = 0.3    # any second box above this makes the probe ambiguous
 GAME_WINDOW_TITLE = "Elite - Dangerous (CLIENT)"
 
-# Right cockpit panel tab headers, measured 2026-11-01 (docked, default head position).
-# Boxes are (x0, x1, y0, y1) at the reference resolution; the row slants in perspective.
+# Box probes: label -> (x0, x1, y0, y1) at the reference resolution; the highlighted
+# box is the one filled with Elite's selection orange. Measured 2026-11-01, docked,
+# default head position.
 PROBES = {
+    # right cockpit panel tab headers (the row slants in perspective)
     "right_panel_tab": {
         "Home": (818, 866, 312, 352),
         "Modules": (880, 1060, 312, 352),
@@ -25,17 +33,50 @@ PROBES = {
         "Status": (1974, 2210, 334, 374),
         "Playlist": (2226, 2300, 338, 378),
     },
+    # galaxy map: icon column right of the system-information card
+    "galmap_strip": {
+        "Route": (2382, 2408, 778, 833),
+    },
 }
+
+# Text probes read a screen region with Windows OCR; the expectation matches when the
+# wanted text occurs in what was read (case-insensitive, whitespace collapsed).
+GALMAP_LIST = (960, 1640, 190, 960)        # search suggestion list
+GALMAP_ROUTE_BAR = (380, 2200, 1240, 1340)  # route summary bar at the bottom
+GALMAP_LIST_COLUMN = 1250                   # x where a highlighted row is solid orange
+
+TEXT_PROBES = ("galmap_search_row", "galmap_route_bar")
+# State probes answer with one of a fixed set of labels, computed by a function.
+STATE_PROBES = {"galmap_search_list": ("open", "closed")}
+
+OCR_SCRIPT = Path(__file__).with_name("ocr.ps1")
 
 
 def parse_expectation(text):
-    """``"right_panel_tab=Inventory"`` -> ``("right_panel_tab", "Inventory")``; None when malformed."""
+    """``"probe=value"`` -> ``(probe, value)``; None when the probe or value is unknown."""
     if not isinstance(text, str) or text.count("=") != 1:
         return None
     probe, value = (part.strip() for part in text.split("="))
-    if probe not in PROBES or value not in PROBES[probe]:
+    if not value:
         return None
-    return probe, value
+    if probe in PROBES and value in PROBES[probe]:
+        return probe, value
+    if probe in STATE_PROBES and value in STATE_PROBES[probe]:
+        return probe, value
+    if probe in TEXT_PROBES:
+        return probe, value
+    return None
+
+
+def matches(probe, seen, want):
+    """Does a probe result satisfy the expectation?"""
+    if probe in TEXT_PROBES:
+        return seen is not None and _norm(want) in _norm(seen)
+    return seen == want
+
+
+def _norm(text):
+    return " ".join(str(text).upper().split())
 
 
 def is_hot(r, g, b):
@@ -55,8 +96,13 @@ def hot_fraction(pixel_at, box, scale=(1.0, 1.0), step=2):
     return hot / total if total else 0.0
 
 
-def evaluate(probe, pixel_at, size):
-    """Label whose box is highlighted, or None when no box or more than one box qualifies."""
+def evaluate(probe, pixel_at, size, ocr=None):
+    """Probe result: a box label, a state label, OCR text, or None when nothing qualifies.
+
+    ``ocr(box)`` reads text lines from a reference-coordinate box; text probes need it.
+    """
+    if probe in STATE_PROBES or probe in TEXT_PROBES:
+        return _evaluate_special(probe, pixel_at, size, ocr)
     boxes = PROBES[probe]
     scale = (size[0] / REFERENCE[0], size[1] / REFERENCE[1])
     scored = sorted(((hot_fraction(pixel_at, box, scale), label) for label, box in boxes.items()), reverse=True)
@@ -65,6 +111,85 @@ def evaluate(probe, pixel_at, size):
     if best >= HOT_MIN and second <= OTHER_MAX:
         return label
     return None
+
+
+def _evaluate_special(probe, pixel_at, size, ocr):
+    sx, sy = size[0] / REFERENCE[0], size[1] / REFERENCE[1]
+    if probe == "galmap_search_list":
+        # an open list fills the region with rows of orange text (closed: < 1 % orange)
+        x0, x1, y0, y1 = GALMAP_LIST
+        orange = total = 0
+        for y in range(int(y0 * sy), int(y1 * sy), 2):
+            for x in range(int((x0 + 10) * sx), int((x1 - 40) * sx), 2):
+                total += 1
+                r, g, b = pixel_at(x, y)
+                orange += r > 150 and g > 70 and b < 80
+        return "open" if total and orange / total > 0.025 else "closed"
+    if probe == "galmap_search_row":
+        row = _highlighted_row(pixel_at, sy, GALMAP_LIST_COLUMN * sx, GALMAP_LIST[2], GALMAP_LIST[3])
+        if row is None or ocr is None:
+            return None
+        x0, x1, _, _ = GALMAP_LIST
+        lines = ocr((x0, x1, int(row[0] / sy), int(row[1] / sy) + 1))
+        return " ".join(line["text"] for line in lines) if lines else None
+    if probe == "galmap_route_bar":
+        if ocr is None:
+            return None
+        lines = ocr(GALMAP_ROUTE_BAR)
+        return " ".join(line["text"] for line in lines) if lines else None
+    return None
+
+
+def _highlighted_row(pixel_at, sy, x, y0, y1):
+    """(top, bottom) in window pixels of a solid-orange run taller than 20 px, else None."""
+    start = prev = None
+    for y in range(int(y0 * sy), int(y1 * sy)):
+        if is_hot(*pixel_at(int(x), y)):
+            if start is None:
+                start = y
+            prev = y
+        elif start is not None:
+            if prev - start > 20:
+                return start, prev
+            start = None
+    return None
+
+
+# ---- OCR (Windows.Media.Ocr through PowerShell) -------------------------------
+
+def write_bmp(path, raw_bgra, width, height, box):
+    """Write ``box`` (x0, x1, y0, y1 in window pixels) of a top-down BGRA buffer as a 32-bit BMP."""
+    x0, x1, y0, y1 = (max(0, min(v, limit)) for v, limit in zip(box, (width, width, height, height)))
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        return False
+    rows = []
+    for y in range(y1 - 1, y0 - 1, -1):          # BMP rows are bottom-up
+        i = (y * width + x0) * 4
+        rows.append(raw_bgra[i:i + w * 4])
+    pixels = b"".join(rows)
+    header = struct.pack("<2sIHHI", b"BM", 54 + len(pixels), 0, 0, 54)
+    info = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 32, 0, len(pixels), 2835, 2835, 0, 0)
+    Path(path).write_bytes(header + info + pixels)
+    return True
+
+
+def ocr_file(path, timeout=20):
+    """OCR lines ``{"text","x","y","w","h"}`` from an image file via ``ocr.ps1``; [] on failure."""
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                              str(OCR_SCRIPT), "-Path", str(path)],
+                             capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    lines = []
+    for line in out.stdout.splitlines():
+        if line.startswith("{"):
+            try:
+                lines.append(json.loads(line))
+            except ValueError:
+                pass
+    return lines
 
 
 # ---- Win32 capture ------------------------------------------------------------
@@ -119,7 +244,7 @@ def capture_game_window():
         i = (y * width + x) * 4
         return raw[i + 2], raw[i + 1], raw[i]   # BGRA -> RGB
 
-    return pixel_at, (width, height)
+    return pixel_at, (width, height), raw
 
 
 def probe_game(probe):
@@ -127,5 +252,15 @@ def probe_game(probe):
     grab = capture_game_window()
     if grab is None:
         return None
-    pixel_at, size = grab
-    return evaluate(probe, pixel_at, size)
+    pixel_at, size, raw = grab
+    sx, sy = size[0] / REFERENCE[0], size[1] / REFERENCE[1]
+
+    def ocr(box):
+        x0, x1, y0, y1 = box
+        path = os.path.join(tempfile.gettempdir(), "edgpt_ocr.bmp")
+        window_box = (int(x0 * sx), int(x1 * sx), int(y0 * sy), int(y1 * sy))
+        if not write_bmp(path, raw, size[0], size[1], window_box):
+            return []
+        return ocr_file(path)
+
+    return evaluate(probe, pixel_at, size, ocr)

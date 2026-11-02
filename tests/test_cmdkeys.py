@@ -157,7 +157,7 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(any("too many" in p for p in M.validate_macro(too_many)))
         self.assertTrue(any("timeout_ms" in p for p in M.validate_macro({"name": "x", "steps": [{"wait_until": "Docked"}]})))
         self.assertTrue(any("runtime" in p for p in M.validate_macro(
-            {"name": "x", "steps": [{"wait": M.MAX_WAIT_MS}] * 4})))
+            {"name": "x", "steps": [{"wait": M.MAX_WAIT_MS}] * (M.MAX_RUNTIME_MS // M.MAX_WAIT_MS + 1)})))
         self.assertTrue(any("exactly one" in p for p in M.validate_macro({"name": "x", "steps": [{"press": "A", "wait": 1}]})))
         self.assertEqual(M.validate_macro({"name": "", "steps": []}), ["macro needs a name"])
 
@@ -401,6 +401,43 @@ class EngineTests(unittest.TestCase):
         result = self.engine.run(macro)
         self.assertFalse(result["ok"])
         self.assertIn("after 8 presses", result["error"])
+
+    def test_params_type_and_conditional_screen_steps(self):
+        macro = {"name": "t", "params": ["system"], "steps": [
+            {"type": "{system}\n"},
+            {"if_screen": "galmap_search_list=open", "press": ["UI_Down", "UI_Select"]},
+            {"if_screen": "galmap_route_bar={system}", "is": False, "press": "UI_Select"},
+            {"expect_screen": "galmap_route_bar={system}"}]}
+        self.assertEqual(M.validate_macro(macro), [])
+        self.assertIn("type cannot send", M.validate_macro({"name": "x", "steps": [{"type": "a?b"}]})[0])
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertIn("missing parameters: system", result["error"])
+        self.assertEqual(self.sender.pressed, [])
+        answers = {"galmap_search_list": "closed", "galmap_route_bar": "DESTINATION ALTAIR 8 JUMPS"}
+        self.engine.screen_probe = lambda probe: answers[probe]
+        result = self.engine.run(macro, params={"system": "Altair"})
+        self.assertTrue(result["ok"], result)
+        keys = [k[0] for k, _ in self.sender.pressed]
+        self.assertEqual(keys, ["Key_A", "Key_L", "Key_T", "Key_A", "Key_I", "Key_R", "Key_Enter"])
+        self.assertTrue(any("skip (galmap_search_list" in line for line in result["log"]))
+        self.assertTrue(any("skip (galmap_route_bar" in line for line in result["log"]))
+        # list open + no route yet: the conditional presses fire
+        self.sender.pressed.clear()
+        answers.update({"galmap_search_list": "open", "galmap_route_bar": "NO ROUTE SET"})
+        result = self.engine.run(macro, params={"system": "Altair"})
+        self.assertFalse(result["ok"])          # final expect fails: bar still says NO ROUTE SET
+        self.assertIn("screen check failed", result["error"])
+        self.assertEqual([k[0] for k, _ in self.sender.pressed][7:], ["Key_F6", "Key_F9", "Key_F9"])
+
+    def test_plot_route_macro_is_valid_and_parameterised(self):
+        macro = next(m for m in M.DEFAULT_MACROS if m["name"] == "Plot route")
+        self.assertEqual(macro["params"], ["system"])
+        filled, missing = M.fill_params(macro, {"system": "Sol"})
+        self.assertEqual(missing, [])
+        self.assertEqual(M.validate_macro(filled), [])
+        self.assertIn({"type": "Sol\n"}, filled["steps"])
+        self.assertIn("galmap_route_bar=Sol", [s.get("expect_screen") for s in filled["steps"]])
 
     def test_invalid_macro_rejected_before_running(self):
         result = self.engine.run({"name": "bad", "steps": [{"wait_until": "Docked"}]})

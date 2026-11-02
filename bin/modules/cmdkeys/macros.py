@@ -1,6 +1,7 @@
 """Macro model, validation, storage and a single-owner execution engine. No Win32 here."""
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -8,10 +9,14 @@ from pathlib import Path
 from . import binds as B
 from . import screen as SC
 
-MAX_STEPS = 12
-MAX_RUNTIME_MS = 30_000
+MAX_STEPS = 20
+MAX_RUNTIME_MS = 60_000
 MAX_WAIT_MS = 10_000
 MAX_SCREEN_PRESSES = 12
+MAX_TYPE_CHARS = 40
+TYPE_KEYS = {" ": "Key_Space", "-": "Key_Minus", "'": "Key_Apostrophe", ".": "Key_Period", "\n": "Key_Enter"}
+TYPE_KEYS.update({c: "Key_" + c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"})
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
 DEFAULT_HOLD_MS = 60
 DEFAULT_GAP_MS = 50    # pause after each press; the game registers keys down to ~10 ms gaps (measured 2026-11-01)
 POLL_MS = 50
@@ -81,6 +86,29 @@ DEFAULT_MACROS = [
      "steps": [{"wait_until": "GuiFocus:GalaxyMap", "timeout_ms": 100},
                {"press": "GalaxyMapOpen"},
                {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 5000}]},
+    {"name": "Plot route", "enabled": False, "params": ["system"],
+     "description": "Open the galaxy map, search {system}, pick it from the suggestion list by OCR when one "
+                    "appears, walk the system-info icon strip to the route button, plot, confirm the route bar "
+                    "names {system}, close the map. Skips the plot when {system} is already the destination "
+                    "(the same button would clear it). PARTLY VERIFIED 2026-11-01: map, search, list "
+                    "handling and OCR work; the route-button step relies on the system-information card, which "
+                    "opened for Sol and Altair but not for Mosche, so the macro can stop with the map open.",
+     "steps": [{"wait_until": "GuiFocus:NoFocus", "timeout_ms": 100},
+               {"press": "GalaxyMapOpen"},
+               {"wait_until": "GuiFocus:GalaxyMap", "timeout_ms": 8000},
+               {"wait": 2500},
+               {"press": ["UI_Right", "UI_Up", "UI_Select"], "gap_ms": 300},
+               {"type": "{system}\n"},
+               {"wait": 2500},
+               {"if_screen": "galmap_search_list=open",
+                "until_screen": "galmap_search_row={system}", "press": "UI_Down", "max_presses": 12, "gap_ms": 400},
+               {"if_screen": "galmap_search_list=open", "press": "UI_Select", "gap_ms": 2000},
+               {"press": "UI_Right", "gap_ms": 400},
+               {"until_screen": "galmap_strip=Route", "press": "UI_Down", "max_presses": 10, "gap_ms": 350},
+               {"if_screen": "galmap_route_bar={system}", "is": False, "press": "UI_Select", "gap_ms": 2000},
+               {"expect_screen": "galmap_route_bar={system}"},
+               {"press": "GalaxyMapOpen"},
+               {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 5000}]},
     {"name": "Open inventory tab", "enabled": False,
      "description": "Open the right panel if needed, then cycle tabs with CycleNextPanel until the screen "
                     "probe sees the Inventory tab highlighted (at most 8 presses).",
@@ -115,18 +143,35 @@ def validate_macro(macro):
         if not isinstance(step, dict):
             problems.append(f"step {index}: not an object")
             continue
-        kinds = [k for k in ("press", "wait", "wait_until", "expect_screen", "until_screen") if k in step]
+        kinds = [k for k in ("press", "wait", "wait_until", "expect_screen", "until_screen", "type") if k in step]
         if "until_screen" in kinds and "press" in kinds:
             kinds.remove("press")   # until_screen carries its own press
         if len(kinds) != 1:
-            problems.append(f"step {index}: exactly one of press/wait/wait_until/expect_screen/until_screen required")
+            problems.append(f"step {index}: exactly one of press/wait/wait_until/expect_screen/until_screen/type required")
             continue
         kind = kinds[0]
-        if kind == "expect_screen":
-            if SC.parse_expectation(step["expect_screen"]) is None:
+        if "if_screen" in step and SC.parse_expectation(PLACEHOLDER.sub("X", str(step["if_screen"]))) is None:
+            problems.append(f"step {index}: if_screen needs 'probe=label' from a known probe")
+        if "if_screen" in step and not isinstance(step.get("is", True), bool):
+            problems.append(f"step {index}: 'is' must be true/false")
+        if kind == "type":
+            text = step["type"]
+            bad = [c for c in PLACEHOLDER.sub("", str(text)).upper() if c not in TYPE_KEYS] if isinstance(text, str) else ["?"]
+            if not isinstance(text, str) or not text:
+                problems.append(f"step {index}: type needs a non-empty string")
+            elif bad:
+                problems.append(f"step {index}: type cannot send {bad!r}")
+            elif len(text) > MAX_TYPE_CHARS:
+                problems.append(f"step {index}: type longer than {MAX_TYPE_CHARS} characters")
+            gap = step.get("gap_ms", DEFAULT_GAP_MS)
+            if not isinstance(gap, int) or not 0 <= gap <= 2000:
+                problems.append(f"step {index}: gap_ms must be 0-2000")
+            budget += MAX_TYPE_CHARS * (DEFAULT_HOLD_MS + (gap if isinstance(gap, int) else 0) + 50)
+        elif kind == "expect_screen":
+            if SC.parse_expectation(PLACEHOLDER.sub("X", str(step["expect_screen"]))) is None:
                 problems.append(f"step {index}: expect_screen needs 'probe=label' from a known probe")
         elif kind == "until_screen":
-            if SC.parse_expectation(step["until_screen"]) is None:
+            if SC.parse_expectation(PLACEHOLDER.sub("X", str(step["until_screen"]))) is None:
                 problems.append(f"step {index}: until_screen needs 'probe=label' from a known probe")
             if not isinstance(step.get("press"), str) or not step.get("press"):
                 problems.append(f"step {index}: until_screen needs a press action")
@@ -142,15 +187,16 @@ def validate_macro(macro):
             per = (hold if isinstance(hold, int) else 0) + (gap if isinstance(gap, int) else 0) + 50
             budget += per * (limit if isinstance(limit, int) else 1)
         elif kind == "press":
-            if not isinstance(step["press"], str) or not step["press"]:
-                problems.append(f"step {index}: press needs an action name")
+            actions = step["press"] if isinstance(step["press"], list) else [step["press"]]
+            if not actions or not all(isinstance(a, str) and a for a in actions):
+                problems.append(f"step {index}: press needs an action name or a list of them")
             hold = step.get("hold_ms", DEFAULT_HOLD_MS)
             if not isinstance(hold, int) or not 0 <= hold <= 2000:
                 problems.append(f"step {index}: hold_ms must be 0-2000")
             gap = step.get("gap_ms", DEFAULT_GAP_MS)
             if not isinstance(gap, int) or not 0 <= gap <= 2000:
                 problems.append(f"step {index}: gap_ms must be 0-2000")
-            budget += (hold if isinstance(hold, int) else 0) + (gap if isinstance(gap, int) else 0) + 50
+            budget += ((hold if isinstance(hold, int) else 0) + (gap if isinstance(gap, int) else 0) + 50) * max(1, len(actions))
         elif kind == "wait":
             ms = step["wait"]
             if not isinstance(ms, int) or not 0 <= ms <= MAX_WAIT_MS:
@@ -202,9 +248,10 @@ def describe_macro(macro, binding=None):
            "problems": validate_macro(macro), "unbound_actions": []}
     if binding:
         for step in macro.get("steps", []):
-            action = step.get("press") if isinstance(step, dict) else None
-            if action and B.keyboard_chord(binding, action) is None:
-                out["unbound_actions"].append(action)
+            actions = step.get("press") if isinstance(step, dict) else None
+            for action in (actions if isinstance(actions, list) else [actions]):
+                if isinstance(action, str) and action and B.keyboard_chord(binding, action) is None:
+                    out["unbound_actions"].append(action)
     return out
 
 
@@ -248,8 +295,15 @@ class MacroEngine:
         if not self.focus_check():
             raise _Abort("game window lost focus")
 
-    def run(self, macro, dry_run=False):
-        """Execute synchronously; returns a result dict. Rejects a second concurrent run."""
+    def run(self, macro, dry_run=False, params=None):
+        """Execute synchronously; returns a result dict. Rejects a second concurrent run.
+
+        ``params`` fills ``{name}`` placeholders in string step values (macros declare them in
+        ``"params"``); a missing parameter is an error before any key is sent.
+        """
+        macro, missing = fill_params(macro, params)
+        if missing:
+            return {"ok": False, "macro": macro.get("name"), "error": f"missing parameters: {', '.join(missing)}"}
         problems = validate_macro(macro)
         if problems:
             return {"ok": False, "macro": macro.get("name"), "error": "invalid macro", "problems": problems}
@@ -273,22 +327,38 @@ class MacroEngine:
                 if "if_flag" in step and ((step["if_flag"] in flags) != step.get("is", True)):
                     log.append(f"{index}: skip (flag {step['if_flag']} is {step['if_flag'] in flags})")
                     continue
+                if "if_screen" in step:
+                    probe, want = SC.parse_expectation(step["if_screen"])
+                    seen = self._probe(probe, dry_run)
+                    if SC.matches(probe, seen, want) != step.get("is", True):
+                        log.append(f"{index}: skip ({probe} is {seen!r})")
+                        continue
                 if "press" in step and "until_screen" not in step:
-                    chord = B.keyboard_chord(binding, step["press"])
-                    if chord is None:
-                        raise _Abort(f"action {step['press']} has no keyboard binding")
-                    keys = B.chord_keys(chord)
-                    if not dry_run:
-                        self.sender.press_chord(keys, step.get("hold_ms", DEFAULT_HOLD_MS))
-                    log.append(f"{index}: press {step['press']} -> {'+'.join(keys)}")
-                    self._sleep_checked(step.get("gap_ms", DEFAULT_GAP_MS) / 1000.0, dry_run)
+                    actions = step["press"] if isinstance(step["press"], list) else [step["press"]]
+                    for action in actions:
+                        chord = B.keyboard_chord(binding, action)
+                        if chord is None:
+                            raise _Abort(f"action {action} has no keyboard binding")
+                        keys = B.chord_keys(chord)
+                        if not dry_run:
+                            self._check(log)
+                            self.sender.press_chord(keys, step.get("hold_ms", DEFAULT_HOLD_MS))
+                        log.append(f"{index}: press {action} -> {'+'.join(keys)}")
+                        self._sleep_checked(step.get("gap_ms", DEFAULT_GAP_MS) / 1000.0, dry_run)
+                elif "type" in step:
+                    for char in step["type"].upper():
+                        if not dry_run:
+                            self._check(log)
+                            self.sender.press_chord([TYPE_KEYS[char]], 40)
+                        self._sleep_checked(step.get("gap_ms", DEFAULT_GAP_MS) / 1000.0, dry_run)
+                    log.append(f"{index}: type {step['type']!r}")
                 elif "wait" in step:
                     self._sleep_checked(step["wait"] / 1000.0, dry_run)
                     log.append(f"{index}: wait {step['wait']} ms")
                 elif "expect_screen" in step:
                     probe, want = SC.parse_expectation(step["expect_screen"])
                     seen = self._probe(probe, dry_run)
-                    if seen != want:
+                    if not SC.matches(probe, seen, want):
                         raise _Abort(f"screen check failed: {probe} is {seen!r}, expected {want!r}")
                     log.append(f"{index}: screen {probe} is {want}")
                 elif "until_screen" in step:
@@ -300,7 +370,7 @@ class MacroEngine:
                     presses = 0
                     while True:
                         seen = self._probe(probe, dry_run)
-                        if seen == want:
+                        if SC.matches(probe, seen, want):
                             break
                         if presses >= step["max_presses"]:
                             raise _Abort(f"{probe} still {seen!r} after {presses} presses of {step['press']}")
@@ -347,6 +417,29 @@ class MacroEngine:
             if remaining <= 0:
                 return
             self.sleep(min(remaining, POLL_MS / 1000.0))
+
+
+def fill_params(macro, params):
+    """Copy of ``macro`` with ``{name}`` placeholders in step strings replaced; also the missing names."""
+    params = {k: str(v) for k, v in (params or {}).items() if isinstance(k, str)}
+    declared = [p for p in macro.get("params", []) if isinstance(p, str)]
+    missing = [p for p in declared if p not in params]
+    if not declared:
+        return macro, []
+
+    def fill(value):
+        if isinstance(value, str):
+            return PLACEHOLDER.sub(lambda m: params.get(m.group(1), m.group(0)), value)
+        if isinstance(value, list):
+            return [fill(v) for v in value]
+        if isinstance(value, dict):
+            return {k: fill(v) for k, v in value.items()}
+        return value
+
+    filled = dict(macro)
+    filled["steps"] = fill(macro.get("steps", []))
+    filled["description"] = fill(macro.get("description", ""))
+    return filled, missing
 
 
 class _Abort(Exception):
