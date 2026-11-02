@@ -61,6 +61,14 @@ DEFAULT_MACROS = [
                {"press": "UI_Up"}, {"press": "UI_Up"},
                {"press": "UI_Select"},
                {"wait_until": "GuiFocus:StationServices", "timeout_ms": 5000}]},
+    {"name": "Close Starport Services", "enabled": False,
+     "description": "Leave Station Services from its root or one or two pages deep: UI_Back up to three "
+                    "times, each only while GuiFocus is still StationServices, then confirm the cockpit view.",
+     "steps": [{"wait_until": "GuiFocus:StationServices", "timeout_ms": 100},
+               {"if_flag": "GuiFocus:StationServices", "is": True, "press": "UI_Back"}, {"wait": 600},
+               {"if_flag": "GuiFocus:StationServices", "is": True, "press": "UI_Back"}, {"wait": 600},
+               {"if_flag": "GuiFocus:StationServices", "is": True, "press": "UI_Back"},
+               {"wait_until": "GuiFocus:NoFocus", "timeout_ms": 3000}]},
 ]
 
 

@@ -286,6 +286,29 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("GuiFocus:StationServices", result["error"])
 
+    def test_close_starport_services_macro(self):
+        macro = next(m for m in M.DEFAULT_MACROS if m["name"] == "Close Starport Services")
+        self.assertEqual(M.validate_macro(macro), [])
+        # not in station services -> aborts, nothing sent
+        self.flags = {"Docked", "GuiFocus:NoFocus"}
+        result = self.engine.run(macro)
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.sender.pressed, [])
+        # two pages deep: first back goes to the root, second back leaves; third is skipped
+        depth = [2]
+        original = self.sender.press_chord
+
+        def back(keys, hold_ms=60):
+            original(keys, hold_ms)
+            depth[0] -= 1
+            self.flags = {"Docked", "GuiFocus:StationServices" if depth[0] > 0 else "GuiFocus:NoFocus"}
+        self.sender.press_chord = back
+        self.flags = {"Docked", "GuiFocus:StationServices"}
+        result = self.engine.run(macro)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([k for k, _ in self.sender.pressed], [["Key_F10"], ["Key_F10"]])
+        self.assertTrue(any("skip" in line for line in result["log"]))
+
     def test_invalid_macro_rejected_before_running(self):
         result = self.engine.run({"name": "bad", "steps": [{"wait_until": "Docked"}]})
         self.assertEqual(result["error"], "invalid macro")
